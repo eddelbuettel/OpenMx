@@ -71,6 +71,8 @@ class omxComputeNumericDeriv : public omxCompute {
 	omxMatrix *fitMat;
 	double minimum;
 	Eigen::ArrayXd optima;
+  double betterMin;
+	Eigen::ArrayXd betterOptima;
 	int numParams;
 	double *gcentral, *gforward, *gbackward;
 	double *hessian;
@@ -78,6 +80,7 @@ class omxComputeNumericDeriv : public omxCompute {
 	bool recordDetail;
 	SEXP detail;
 
+  void maybeSaveBetterMin(FitContext *fc, double fv);
 	void omxPopulateHessianWork(struct hess_struct *hess_work, FitContext* fc);
 	void omxEstimateHessianOnDiagonal(int i, struct hess_struct* hess_work);
 	void omxEstimateHessianOffDiagonal(int i, int l, struct hess_struct* hess_work);
@@ -121,6 +124,16 @@ class omxComputeNumericDeriv : public omxCompute {
         virtual void reportResults(FitContext *fc, MxRList *slots, MxRList *out);
 };
 
+void omxComputeNumericDeriv::maybeSaveBetterMin(FitContext *fc, double fv)
+{
+  if (fv >= betterMin) return;
+#pragma omp critical
+  if (fv < betterMin) {
+    betterMin = fv;
+    betterOptima = fc->est;
+  }
+}
+
 void omxComputeNumericDeriv::omxPopulateHessianWork(struct hess_struct *hess_work, FitContext* fc)
 {
 	hess_work->probeCount = 0;
@@ -162,6 +175,7 @@ void omxComputeNumericDeriv::omxEstimateHessianOnDiagonal(int i, struct hess_str
 		++hess_work->probeCount;
 		omxRecompute(fitMatrix, fc);
 		double f1 = omxMatrixElement(fitMatrix, 0, 0);
+    maybeSaveBetterMin(fc, f1);
 
 		freeParams[ix] = optima[i] - iOffset;
 
@@ -170,6 +184,7 @@ void omxComputeNumericDeriv::omxEstimateHessianOnDiagonal(int i, struct hess_str
 		++hess_work->probeCount;
 		omxRecompute(fitMatrix, fc);
 		double f2 = omxMatrixElement(fitMatrix, 0, 0);
+    maybeSaveBetterMin(fc, f2);
 
 		Gcentral[k] = (f1 - f2) / (2.0*iOffset); 						// This is for the gradient
 		Gforward[k] = (minimum - f2) / iOffset;
@@ -225,6 +240,7 @@ void omxComputeNumericDeriv::omxEstimateHessianOffDiagonal(int i, int l, struct 
 		++hess_work->probeCount;
 		omxRecompute(fitMatrix, fc);
 		double f1 = omxMatrixElement(fitMatrix, 0, 0);
+    maybeSaveBetterMin(fc, f1);
 
 		freeParams[ix] = optima[i] - iOffset;
 		freeParams[lx] = optima[l] - lOffset;
@@ -234,6 +250,7 @@ void omxComputeNumericDeriv::omxEstimateHessianOffDiagonal(int i, int l, struct 
 		++hess_work->probeCount;
 		omxRecompute(fitMatrix, fc);
 		double f2 = omxMatrixElement(fitMatrix, 0, 0);
+    maybeSaveBetterMin(fc, f2);
 
 		Haprox[k] = (f1 - 2.0 * minimum + f2 - hessian[i*numParams+i]*iOffset*iOffset -
 						hessian[l*numParams+l]*lOffset*lOffset)/(2.0*iOffset*lOffset);
@@ -408,6 +425,7 @@ void omxComputeNumericDeriv::computeImpl(FitContext *fc)
 	if (!fc->haveReferenceFit(fitMat)) return;
 
 	minimum = fc->fit;
+  betterMin = minimum;
 
 	hessWorkVector = new hess_struct[numChildren];
 	if (numChildren == 1) {
@@ -526,7 +544,12 @@ void omxComputeNumericDeriv::computeImpl(FitContext *fc)
 	}
 
   fc->destroyChildren();
-	fc->setEstFromOptimizer(optima);
+  if (betterMin < minimum) {
+    mxLog("%s: improved fit from %f -> %f; try re-running", name, minimum, betterMin);
+    fc->setEstFromOptimizer(betterOptima);
+  } else {
+    fc->setEstFromOptimizer(optima);
+  }
 	// auxillary information like per-row likelihoods need a refresh
 	ComputeFit(name, fitMat, FF_COMPUTE_FIT, fc);
 	fc->wanted = newWanted;
